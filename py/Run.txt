@@ -1,0 +1,24 @@
+>>> len(headfa1)
+156
+>>> totalfa=headfa1+tailfa2; headfa=headfa1+headfa2; tailfa=tailfa1+tailfa2
+>>> 
+>>> len(tailfa2)
+137
+>>> len(totalfa)
+293
+
+
+samtools tview $line /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+
+
+> do 
+> echo samtools tview $line /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+> done
+samtools tview TCGA-AB-2806-03A_3.sorted.bam /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+samtools tview TCGA-AB-2819-03A_5.sorted.bam /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+samtools tview TCGA-AB-2858-03A_1.sorted.bam /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+samtools tview TCGA-AB-2875-03A_4.sorted.bam /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+samtools tview TCGA-AB-2886-03A_5.sorted.bam /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+samtools tview TCGA-AB-2937-03A_6.sorted.bam /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+samtools tview TCGA-AB-2950-03A_8.sorted.bam /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa
+samtools tview TCGA-AB-2970-03A_3.sorted.bam /storage/home/mglee/LAML_fish/map_fusion/b1.RUNX1_RUNX1T1/Fa/RUNX1_RUNX1T1_merge.fa

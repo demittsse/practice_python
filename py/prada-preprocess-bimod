@@ -1,0 +1,324 @@
+#!/usr/bin/env python
+
+#This is a program to implement the PRADA pipeline "process subsection", based on the work of Rahul Vegesna and Wandaliz Torres-Garcia
+#It merely generates a PBS file, depending on the user input entry point (step) 
+#Author: Siyuan Zheng, szheng2@mdanderson.org
+#Copy right belongs to Roel Verhaak's lab from MD Anderson Cancer Center, Department of Bioinformatics and Computational Biology. 
+#Last revision: 02/17/2014
+
+import subprocess
+import os,os.path
+import sys
+import time
+import ioprada
+import re
+
+########################################################################################
+args=sys.argv
+
+help_menu='''\nPipeline for RNAseq Data Analaysis - preprocessing pipeline (PRADA).
+\t**Usage**:
+\tprada-preprocess-bi -conf xx.txt -inputdir .. -sample XX -tag TCGA-XX -platform illumina -step 1_1 -intermediate no -pbs xxx -outdir ... -submit no
+\t**Parameters**:
+\t-h		print help message
+\t-step_info	print complete steps curated in the module.
+\t-inputdir	the dir where the input bam or fastq can be found.
+\t-sample		input sample name. PRADA searches for sample.bam or sample.end1.fastq/sample.end2.fastq, etc, depending on the 
+\t		initiating step number. See step_info for more information. 
+\t-conf		config file for references and parameters. Default is conf.txt in py-PRADA installation folder. 
+\t-tag		a tag to describe the sample, likely sample ID, such as TCGA-LGG-01; no default.
+\t-platform	only illumina at present (default). 
+\t-step		values: 1_1/2,2_e1/2_1/2/3/4,3_e1/2_1/2,4_1/2,5,6_1/2,7,8; example 2_e1_1; no default.
+\t-outdir		output dir. Default is the directory where the input bam is. 
+\t-pbs		name for output pbs file and log file. Default (time-stamp) is used if no input. 
+\t-intermediate	values:yes/no; if intermediate files should be kept. Default is not. 
+\t-submit		if submit the job to HPC, default is no. If yes, ppn is set to 12.
+\t-v		print version information. 
+'''
+
+steps_info='''
+Command orders (sample XX)
+step 1_1	-->  XX.sorted.bam [sort input bam by name]
+step 1_2	-->  XX.end1/2.fastq [extract reads from bam]
+step 2_e1_1	-->  XX.end1.sai [realign end1 reads to composite reference]
+step 2_e1_2	-->  XX.end1.sam [generate sam]
+step 2_e1_3	-->  XX.end1.bam [generate bam]
+step 2_e1_4	-->  XX.end1.sorted.bam [sort bam]
+step 2_e2_1	-->  XX.end2.sai [realign end2 reads to composite reference]
+step 2_e2_2	-->  XX.end2.sam [generate sam]
+step 2_e2_3	-->  XX.end2.bam [generate bam]
+step 2_e2_4	-->  XX.end2.sorted.bam [sort bam]
+step 3_e1_1	-->  XX.end1.remapped.bam [remap end1 to genome]
+step 3_e1_2	-->  XX.end1.remapped.sorted.bam [sort remapped bam]
+step 3_e2_1	-->  XX.end2.remapped.bam [remap end2 to genome]
+step 3_e2_2	-->  XX.end2.remapped.sorted.bam [sort remapped bam]
+step 4_1	-->  XX.paired.bam [pair end1 and end1]
+step 4_2	-->  XX.paired.sorted.bam [sort paired bam]
+step 5		-->  XX.withRG.paired.sorted.bam [add read group]
+step 6_1	-->  XX.orig.csv [prepair recalibration table]
+step 6_2	-->  XX.withRG.GATKRecalibrated.bam [recalibration]
+step 7		-->  XX.withRG.GATKRecalibrated.flagged.bam [flag duplication reads]
+step 8		-->  folder XX for gene expression, QC metrics etc. [generate QC and expression]
+'''
+
+if '-h' in args or '-help' in args or len(args)==1:
+    print help_menu
+    sys.exit(0)
+if '-step_info' in args:
+    print steps_info
+    sys.exit(0)
+if '-v' in args:
+    import version
+    print version.version
+    sys.exit(0)
+
+if '-sample' not in args:
+    sys.exit('ERROR: Sample name is needed')
+if '-step' not in args:
+    sys.exit('ERROR: Step number is needed')
+if '-tag' not in args:
+    sys.exit('ERROR: A tag is needed')
+
+i=args.index('-sample')
+sample=args[i+1]
+if '-inputdir' not in args:
+    inputpath=os.path.abspath('./')
+else:
+    i=args.index('-inputdir')
+    inputpath=args[i+1]
+bampath=os.path.abspath(inputpath)+'/%s.bam'%sample
+fq1path='/%s_1.fastq'%sample
+fq2path='/%s_2.fastq'%sample
+
+if '-outdir' not in args:
+    outpath=os.path.dirname(bampath)
+else:
+    i=args.index('-outdir')
+    outpath=os.path.abspath(args[i+1])
+if not os.path.exists(outpath):
+    os.mkdir(outpath)
+
+#bam=os.path.basename(bampath)
+#sample=bam[:-4]
+i=args.index('-step')
+step=args[i+1]
+i=args.index('-tag')
+tag=args[i+1]
+
+prada_path=os.path.dirname(os.path.abspath(__file__))   ####
+ref_search_path=[prada_path,os.getcwd()]                #search path for ref file if not specified in command line
+
+if '-conf' in args:
+    i=args.index('-conf')
+    reffile=args[i+1]
+    if os.path.exists(reffile):
+        pass
+    else:
+        for pth in ref_search_path:
+            new_reffile='%s/%s'%(pth, os.path.basename(reffile))
+            if os.path.exists(new_reffile):
+                reffile=new_reffile
+                break
+        else:
+            sys.exit('ERROR: conf file %s not found'%reffile)
+else:
+    reffile='%s/conf.txt'%prada_path
+    if not os.path.exists(reffile):
+        sys.exit('ERROR: No default conf.txt found and none specified')
+
+if '-platform' in args:
+    i=args.index('-platform')
+    plat=args[i+1]
+else:
+    plat='illumina'
+if '-submit' in args:
+    i=args.index('-submit')
+    submit=args[i+1]
+else:
+    submit='no'
+if '-intermediate' in args:
+    i=args.index('-intermediate')
+    keepmed=args[i+1]
+else:
+    keepmed='False'
+
+if keepmed in ['False','FALSE','false','F','NO','No','no','n']:
+    keepmed_flag='no'
+elif keepmed in ['True','TRUE','true','T','YES','Yes','yes','y']:
+    keepmed_flag='yes'
+else:
+    sys.exit('ERROR: -intermediate value not recognized')
+
+if '-pbs' in args:
+    i=args.index('-pbs')
+    docstr=args[i+1]
+else:
+    a=time.ctime().split()
+    b=time.time()
+    timestamp='_'.join([a[-1],a[1],a[2]])+'.'+str(b)
+    docstr='prada_prep_'+timestamp
+logfilename=sample.split("/")[6]+'.log'
+pbsfilename=sample.split("/")[6]+'.sh'
+pbspath=outpath+'/11.sh_ACC/'+pbsfilename
+logpath=outpath+'/log/'+logfilename
+########################################################################################
+
+########################################################################################
+#underlying utilities, automatically detected
+samtools='%s/tools/samtools-0.1.16/samtools'%prada_path
+bwa='%s/tools/bwa-0.5.7-mh/bwa'%prada_path
+gatk='%s/tools/GATK/'%prada_path
+picard='%s/tools/Picard/'%prada_path
+seqc='%s/tools/RNA-SeQC_v1.1.7.jar'%prada_path
+#Default uses 12 nodes in HPC
+#########################################################################################
+
+#########################################################################################
+#reference files
+refdict=ioprada.read_conf(reffile)
+genome_gtf=refdict['--REF--']['genome_gtf']
+compdb_fasta=refdict['--REF--']['compdb_fasta']
+compdb_map=refdict['--REF--']['compdb_map']
+genome_fasta=refdict['--REF--']['genome_fasta']
+dbsnp_vcf=refdict['--REF--']['dbsnp_vcf']
+select_tx=refdict['--REF--']['select_tx']
+pat=re.compile('ppn=(\d*)')
+parallel_n=pat.search(refdict['--PBS--']['-l']).groups()[0]
+#########################################################################################
+
+#########################################################################################
+#pipeline command lines.
+##Cleaning up steps: if -intermediate is yes, none will be executed.
+step_1_1_cmd=['%s sort -n -m 1000000000 %s %s.sorted'%(samtools,bampath,sample)]
+post_1_1_clean=[]
+step_1_2_cmd=['java -Xmx8g -jar %s/SamToFastq.jar INPUT=%s.sorted.bam FASTQ=%s_1.fastq SECOND_END_FASTQ=%s_1.fastq INCLUDE_NON_PF_READS=true VALIDATION_STRINGENCY=SILENT TMP_DIR=tmp/'%(picard,sample,sample,sample)]
+post_1_2_clean=['rm -f %s.sorted.bam'%sample]
+alnparams=' '.join([' '.join(x) for x in refdict['--BWA aln--'].items()])
+samseparams=' '.join([' '.join(x) for x in refdict['--BWA samse--'].items()])
+if step == '2_e1_1' or step == '2_e2_1':
+    step_2_e1_1_cmd=['%s aln %s %s %s > %s.end1.sai'%(bwa,alnparams,compdb_fasta,fq1path,sample)]
+    post_2_e1_1_clean=[]
+    step_2_e1_2_cmd=['%s samse -s %s %s %s.end1.sai %s > %s.end1.sam'%(bwa,samseparams,compdb_fasta,sample,fq1path,sample)]
+    post_2_e1_2_clean=['rm -f %s.end1.sai'%sample]
+    step_2_e2_1_cmd=['%s aln %s %s %s > %s.end2.sai'%(bwa,alnparams,compdb_fasta,fq2path,sample)]
+    post_2_e2_1_clean=[]
+    step_2_e2_2_cmd=['%s samse -s %s %s %s.end2.sai %s > %s.end2.sam'%(bwa,samseparams,compdb_fasta,sample,fq2path,sample)]
+    post_2_e2_2_clean=['rm -f %s.end2.sai'%sample]
+else:
+    step_2_e1_1_cmd=['%s aln %s %s %s_1.fastq > %s.end1.sai'%(bwa,alnparams,compdb_fasta,sample,sample)]
+    post_2_e1_1_clean=[]
+    step_2_e1_2_cmd=['%s samse -s %s %s %s.end1.sai %s_1.fastq > %s.end1.sam'%(bwa,samseparams,compdb_fasta,sample,sample,sample)]
+    post_2_e1_2_clean=['rm -f %s.end1.sai'%sample,'rm -f %s_1.fastq'%sample]
+    step_2_e2_1_cmd=['%s aln %s %s %s_2.fastq > %s.end2.sai'%(bwa,alnparams,compdb_fasta,sample,sample)]
+    post_2_e2_1_clean=[]
+    step_2_e2_2_cmd=['%s samse -s %s %s %s.end2.sai %s_2.fastq > %s.end2.sam'%(bwa,samseparams,compdb_fasta,sample,sample,sample)]
+    post_2_e2_2_clean=['rm -f %s.end2.sai'%sample,'rm -f %s_2.fastq'%sample]
+step_2_e1_3_cmd=['%s view -bS -o %s.end1.bam %s.end1.sam'%(samtools,sample,sample)]
+post_2_e1_3_clean=['rm -f %s.end1.sam'%sample]
+step_2_e1_4_cmd=['%s sort -n -m 1000000000 %s.end1.bam %s.end1.sorted'%(samtools,sample,sample)]
+post_2_e1_4_clean=['rm -f %s.end1.bam'%sample]
+step_2_e2_3_cmd=['%s view -bS -o %s.end2.bam %s.end2.sam'%(samtools,sample,sample)]
+post_2_e2_3_clean=['rm -f %s.end2.sam'%sample]
+step_2_e2_4_cmd=['%s sort -n -m 1000000000 %s.end2.bam %s.end2.sorted'%(samtools,sample,sample)]
+post_2_e2_4_clean=['rm -f %s.end2.bam'%sample]
+step_3_e1_1_cmd=['java -Djava.io.tmpdir=tmp/ -cp %s/RemapAlignments.jar -Xmx8g org.broadinstitute.cga.tools.gatk.rna.RemapAlignments M=%s IN=%s.end1.sorted.bam OUT=%s.end1.remapped.bam R=%s REDUCE=TRUE'%(gatk,compdb_map,sample,sample,genome_fasta)]
+post_3_e1_1_clean=['rm -f %s.end1.sorted.bam'%sample]
+step_3_e1_2_cmd=['%s sort -n -m 1000000000 %s.end1.remapped.bam %s.end1.remapped.sorted'%(samtools,sample,sample)]
+post_3_e1_2_clean=['rm -f %s.end1.remapped.bam'%sample]
+step_3_e2_1_cmd=['java -Djava.io.tmpdir=tmp/ -cp %s/RemapAlignments.jar -Xmx8g org.broadinstitute.cga.tools.gatk.rna.RemapAlignments M=%s IN=%s.end2.sorted.bam OUT=%s.end2.remapped.bam R=%s REDUCE=TRUE'%(gatk,compdb_map,sample,sample,genome_fasta)]
+post_3_e2_1_clean=['rm -f %s.end2.sorted.bam'%sample]
+step_3_e2_2_cmd=['%s sort -n -m 1000000000 %s.end2.remapped.bam %s.end2.remapped.sorted'%(samtools,sample,sample)]
+post_3_e2_2_clean=['rm -f %s.end2.remapped.bam'%sample]
+step_4_1_cmd=['java -Djava.io.tmpdir=tmp/ -Xmx8g -jar %s/PairMaker.jar IN1=%s.end1.remapped.sorted.bam IN2=%s.end2.remapped.sorted.bam OUTPUT=%s.paired.bam TMP_DIR=tmp/'%(gatk,sample,sample,sample)]
+post_4_1_clean=['rm -f %s.end1.remapped.sorted.bam'%sample,'rm -f %s.end2.remapped.sorted.bam'%sample]
+step_4_2_cmd=['%s sort -m 1000000000 %s.paired.bam %s.paired.sorted'%(samtools,sample,sample)]
+post_4_2_clean=['rm -f %s.paired.bam'%sample]
+step_5_cmd=['java -Xmx8g -jar %s/AddOrReplaceReadGroups.jar I=%s.paired.sorted.bam O=%s.withRG.paired.sorted.bam RGLB=%s RGPL=%s RGPU=%s RGSM=%s'%(picard,sample,sample,tag,plat,tag,tag)]
+post_5_clean=['rm -f %s.paired.sorted.bam'%sample]
+step_6_1_cmd=['%s index %s.withRG.paired.sorted.bam'%(samtools,sample),'java -Xmx8g -jar %s/GenomeAnalysisTK.jar -l INFO -R %s --default_platform %s --knownSites %s -I %s.withRG.paired.sorted.bam --downsample_to_coverage 10000 -T CountCovariates -cov ReadGroupCovariate -cov QualityScoreCovariate -cov CycleCovariate -cov DinucCovariate -nt %s -recalFile %s.orig.csv'%(gatk,genome_fasta,plat,dbsnp_vcf,sample,parallel_n,sample)]
+post_6_1_clean=[]
+step_6_2_cmd=['java -Xmx8g -jar %s/GenomeAnalysisTK.jar -l INFO -R %s --default_platform %s -I %s.withRG.paired.sorted.bam -T TableRecalibration --out %s.withRG.GATKRecalibrated.bam -recalFile %s.orig.csv'%(gatk,genome_fasta,plat,sample,sample,sample)]
+post_6_2_clean=['rm -f %s.withRG.paired.sorted.bam'%sample,'rm -f %s.withRG.paired.sorted.bam.bai'%sample,'rm -f %s.orig.csv'%sample]
+step_7_cmd=['java -Xmx8g -jar %s/MarkDuplicates.jar I=%s.withRG.GATKRecalibrated.bam O=%s.withRG.GATKRecalibrated.flagged.bam METRICS_FILE=%s.Duplicates_metrics.txt VALIDATION_STRINGENCY=SILENT TMP_DIR=tmp/'%(picard,sample,sample,sample),'%s index %s.withRG.GATKRecalibrated.flagged.bam'%(samtools,sample)]
+post_7_clean=['rm -f %s.withRG.GATKRecalibrated.bam'%sample,'rm -f %s.withRG.GATKRecalibrated.bai'%sample,'rm -f %s.Duplicates_metrics.txt'%sample]
+step_8_cmd=["java -Xmx8g -jar %s -ttype 2 -t %s -r %s -s '%s|%s.withRG.GATKRecalibrated.flagged.bam|Disc' -o %s/"%(seqc,genome_gtf,genome_fasta,sample,sample,sample)]
+post_8_clean=[]
+
+cmdset=[]
+for item in globals().keys():
+    if item.endswith('_cmd'):
+        cmdset.append(item)
+cmdset.sort()
+
+#########################################################################################
+#write PBS file
+
+###############Entry Point
+try:
+    cmd_entry=cmdset.index('step_'+step+'_cmd')    ##entry point
+except ValueError:
+    sys.exit('ERROR: STEP not recognized')
+
+def _parsecmd(cmd):
+    '''pase cmd str for step information'''
+    info=cmd.split('_')
+    cstep='_'.join(info[1:-1])
+    return cstep
+
+###########################
+##headers
+outfile=open(pbspath,'w')
+outfile.write('#! /bin/sh\n')
+outfile.write('#$ -S /bin/bash\n')
+outfile.write('#$ -N %s\n'%tag.split("TCGA-")[1])
+outfile.write('#$ -j y\n')
+outfile.write('#$ -o %s\n'%logpath)
+outfile.write('#$ -e %s\n'%logpath)
+
+
+#commands
+outfile.write('echo "Job start: `date`"\n')
+
+for i in range(cmd_entry,len(cmdset)):
+    cmd=cmdset[i]
+    cstep=_parsecmd(cmd)
+    clean_flag=1
+    outfile.write('echo "step %s start: `date`"\n'%cstep)
+    outfile.write('if\n')
+    outfile.write('\t%s\n'%('\n'.join(eval(cmd))))
+    outfile.write('then\n')
+    outfile.write('\techo "step %s done: `date`"\n'%cstep)
+    outfile.write('else\n')
+    outfile.write('\techo "step %s ERROR"\n'%cstep)
+    outfile.write('\texit\n')
+    outfile.write('fi\n')
+
+    if keepmed_flag=='yes': #if so, keep files by force
+        clean_flag=0
+    
+    if clean_flag==1:
+        outfile.write('\n'.join(eval('post_%s_clean'%cstep)))
+        outfile.write('\n')
+
+outfile.write('echo "PIPELINE FINISHED"\n')
+outfile.close()
+######################################################################
+
+if submit in ['False','FALSE','false','F','NO','No','no','n']:
+    jid='Not_Submitted'
+    logpath='None'
+elif submit in ['True','TRUE','true','T','YES','Yes','yes','y']:
+    cmdstr='qsub -pe mpi 12 %s'%pbspath
+    cmd=cmdstr.split()
+    cmdout=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    jid=cmdout.stdout.read().strip()   ##JOB ID
+else:
+    sys.exit('ERROR: submit parameter not recognized')
+ 
+print '#!#%s'%tag
+print 'BAM\t%s'%bampath
+print 'Entry\t%s'%step
+print 'PBS\t%s'%pbspath
+print 'JOB\t%s'%jid
+print 'LOG\t%s'%logpath
+
